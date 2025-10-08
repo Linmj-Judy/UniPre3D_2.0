@@ -70,7 +70,7 @@ def readCamerasFromTxt(
             c2w = _read_camera_matrix(cam_name)
 
             # Apply ScanNet-specific transformations
-            if dataset_type == "scannet" and moving_centers is not None:
+            if moving_centers is not None:
                 c2w[:3, 3] -= moving_centers
         else:
             c2w = pose_paths_or_matrix[idx]
