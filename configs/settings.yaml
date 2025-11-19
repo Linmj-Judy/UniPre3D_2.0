@@ -18,7 +18,30 @@ opt:
   pretrained_ckpt: null
 
   # Saves all image tensors in the memory when training. More memory-consuming but faster.
-  record_img: true 
+  record_img: true
+  
+  # ===== Improved Fusion Strategy Configuration =====
+  # Enable learnable gating mechanism for adaptive feature fusion
+  use_learnable_gating: false
+  
+  # Enable routing mechanism to select fusion strategies
+  use_routing: false
+  
+  # Gumbel-Softmax temperature annealing schedule
+  router_temp_start: 1.0
+  router_temp_end: 0.1
+  router_temp_anneal_iters: 50000
+  
+  # Regularization for preventing over-reliance on 2D features
+  drop_path_rate: 0.2  # DropPath rate for 2D features
+  feature_dropout_rate: 0.2  # Channel dropout rate for 2D features
+  
+  # Loss weights for improved model
+  lambda_sparse: 0.01  # Routing sparsity regularization
+  lambda_consistency: 0.1  # Feature consistency loss
+  
+  # Enable dual forward pass for consistency loss (with/without 2D)
+  use_dual_forward: false 
 
 model:
   max_sh_degree: 1
@@ -31,3 +54,6 @@ logging:
   loop_log: 2000
   render_log: 2000
   centered: true
+
+env:
+  torch_home: null

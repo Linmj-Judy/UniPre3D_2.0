@@ -14,7 +14,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 import hydra
-from omegaconf import DictConfig, open_dict
+from omegaconf import DictConfig, open_dict, OmegaConf
 from ema_pytorch import EMA
 import torch.distributed as dist
 import pointcept.utils.comm as comm
@@ -28,7 +28,14 @@ from gaussian_renderer import render_predicted
 from eval import evaluate_dataset
 from utils.general_utils import safe_state, to_device,prepare_model_inputs
 
-from utils.loss_utils import l1_loss, l2_loss, focal_l2_loss
+from utils.loss_utils import (
+    l1_loss, 
+    l2_loss, 
+    focal_l2_loss,
+    compute_total_loss,
+    feature_consistency_loss,
+    routing_sparsity_loss,
+)
 import lpips as lpips_lib
 from typing import Dict, List, Tuple
 from functools import partial
@@ -262,8 +269,11 @@ class ValidationManager:
         rendered_images: torch.Tensor,
         gt_images: torch.Tensor,
         iteration: int,
+        routing_weights: torch.Tensor = None,
+        feat_with_2d: torch.Tensor = None,
+        feat_without_2d: torch.Tensor = None,
     ) -> Dict[str, torch.Tensor]:
-        """Calculate all training losses"""
+        """Calculate all training losses including improved regularization terms"""
         losses = {}
 
         # Calculate reconstruction loss
@@ -293,10 +303,32 @@ class ValidationManager:
             losses["lpips_loss"] = torch.mean(
                 self.lpips_fn(rendered_images * 2 - 1, gt_images * 2 - 1)
             )
+        else:
+            losses["lpips_loss"] = torch.tensor(0.0, device=self.device)
+
+        # Add routing sparsity loss if routing is enabled
+        if routing_weights is not None and hasattr(self.cfg.opt, 'lambda_sparse'):
+            losses["sparse_loss"] = routing_sparsity_loss(
+                routing_weights, self.cfg.opt.lambda_sparse
+            )
+        else:
+            losses["sparse_loss"] = torch.tensor(0.0, device=self.device)
+
+        # Add feature consistency loss if dual forward is enabled
+        if (feat_with_2d is not None and feat_without_2d is not None and 
+            hasattr(self.cfg.opt, 'lambda_consistency')):
+            losses["consistency_loss"] = feature_consistency_loss(
+                feat_with_2d, feat_without_2d, stop_gradient=True
+            )
+        else:
+            losses["consistency_loss"] = torch.tensor(0.0, device=self.device)
 
         # Calculate total loss
         losses["total_loss"] = (
-            losses["l12_loss"] + losses.get("lpips_loss", 0) * self.cfg.opt.lambda_lpips
+            losses["l12_loss"] 
+            + losses["lpips_loss"] * self.cfg.opt.lambda_lpips
+            + losses["sparse_loss"]
+            + losses["consistency_loss"] * getattr(self.cfg.opt, 'lambda_consistency', 0.0)
         )
 
         return losses
@@ -317,6 +349,12 @@ class Trainer:
         self.validation_manager = ValidationManager(cfg, self.device, self.logger)
 
         self.best_psnr = 0.0
+        
+        # Initialize router temperature annealing if routing is enabled
+        if getattr(cfg.opt, 'use_routing', False):
+            self.router_temp_start = cfg.opt.router_temp_start
+            self.router_temp_end = cfg.opt.router_temp_end
+            self.router_temp_anneal_iters = cfg.opt.router_temp_anneal_iters
 
     def train(self) -> None:
         """Main training loop"""
@@ -447,20 +485,70 @@ class Trainer:
 
         return rendered_images, gt_images
 
+    def update_router_temperature(self, iteration: int):
+        """Update router temperature for Gumbel-Softmax annealing"""
+        if getattr(self.cfg.opt, 'use_routing', False):
+            progress = min(iteration / self.router_temp_anneal_iters, 1.0)
+            current_temp = self.router_temp_start + (self.router_temp_end - self.router_temp_start) * progress
+            
+            # Update temperature in model's router
+            if hasattr(self.model_manager.model, 'module'):
+                # DDP model
+                if hasattr(self.model_manager.model.module, 'router'):
+                    self.model_manager.model.module.router.set_temperature(current_temp)
+            else:
+                if hasattr(self.model_manager.model, 'router'):
+                    self.model_manager.model.router.set_temperature(current_temp)
+    
     def train_iteration(self, iteration: int) -> Dict[str, torch.Tensor]:
         """Execute one training iteration"""
         data = next(iter(self.data_manager.train_loader))
 
         model_inputs = prepare_model_inputs(data, self.cfg, self.data_manager.bs_per_gpu, self.device)
 
+        # Update router temperature if using routing
+        self.update_router_temperature(iteration)
+
         self.model_manager.model.train()
-        gaussian_splats = self.model_manager.model(**model_inputs)
+        
+        # Check if dual forward pass is needed for consistency loss
+        use_dual_forward = getattr(self.cfg.opt, 'use_dual_forward', False)
+        routing_weights = None
+        feat_with_2d = None
+        feat_without_2d = None
+        
+        if use_dual_forward and self.cfg.opt.use_fusion:
+            # Forward pass WITH 2D features
+            gaussian_splats = self.model_manager.model(**model_inputs)
+            
+            # Extract intermediate features if available
+            if hasattr(self.model_manager.model, 'get_intermediate_features'):
+                feat_with_2d = self.model_manager.model.get_intermediate_features()
+            
+            # Forward pass WITHOUT 2D features (for consistency loss)
+            model_inputs_no_2d = model_inputs.copy()
+            model_inputs_no_2d['image'] = None
+            
+            with torch.no_grad():
+                _ = self.model_manager.model(**model_inputs_no_2d)
+                if hasattr(self.model_manager.model, 'get_intermediate_features'):
+                    feat_without_2d = self.model_manager.model.get_intermediate_features()
+        else:
+            # Standard forward pass
+            gaussian_splats = self.model_manager.model(**model_inputs)
+        
+        # Extract routing weights if available
+        if hasattr(self.model_manager.model, 'get_routing_weights'):
+            routing_weights = self.model_manager.model.get_routing_weights()
         
         rendered_images, gt_images = self.render_validation_views(gaussian_splats, data)
 
-        # Log rendered images if needed
+        # Calculate losses with additional terms
         return self.validation_manager.calculate_losses(
-            rendered_images, gt_images, iteration
+            rendered_images, gt_images, iteration,
+            routing_weights=routing_weights,
+            feat_with_2d=feat_with_2d,
+            feat_without_2d=feat_without_2d,
         )
 
     def validate(self, iteration: int) -> None:
@@ -565,6 +653,12 @@ def main(cfg: DictConfig):
             cfg.general.multiple_gpu = len(cfg.general.device) > 1
         else:
             cfg.general.multiple_gpu = False
+
+    torch_home = OmegaConf.select(cfg, "env.torch_home", default=None)
+    if torch_home:
+        torch_home = os.path.abspath(os.path.expanduser(str(torch_home)))
+        os.makedirs(torch_home, exist_ok=True)
+        os.environ["TORCH_HOME"] = torch_home
 
 
     multiprocessing.set_start_method("spawn")

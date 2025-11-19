@@ -16,7 +16,7 @@ setup(
         'src/sampling_gpu.cu',
         ],
         extra_compile_args={'cxx': ['-g'],
-                            'nvcc': ['-O2']})
+                            'nvcc': ['-O2', '-gencode', 'arch=compute_80,code=sm_80']})
     ],
     cmdclass={'build_ext': BuildExtension}
 )

@@ -1,0 +1,59 @@
+defaults:
+  - /settings@_here_  # Superimpose the basic settings
+  - /dataset/shapenet@_here_  # Superimpose the dataset settings
+
+general:
+  cuda: true
+  device: 0
+  random_seed: 42
+
+data:
+  fov: 49.13434264120263
+  training_resolution: 128
+  input_images: 1
+
+model:
+  backbone_type: transformer
+  in_channels: 3
+  aug: true
+  offset_scale: 1.0
+  
+opt:
+  iterations: 100000
+  mode: "train"
+  # use ShapeNet dataset
+  level: "object"
+  use_fusion: true
+  base_lr: 0.0001
+  batch_size: 32
+  test_generation_num: 1
+  loss: focal_l2
+  non_bg_color_loss_rate: 4
+  bg_color_loss_rate: 1
+  step_lr: 20000
+  lr_gamma: 0.8
+  start_lpips_after: 50000
+  
+  # ===== Improved Fusion Configuration =====
+  # Enable learnable gating for adaptive fusion
+  use_learnable_gating: true
+  
+  # Enable routing mechanism (for scene-level primarily)
+  use_routing: false  # Set to true for scene-level experiments
+  
+  # Gumbel-Softmax temperature annealing
+  router_temp_start: 1.0
+  router_temp_end: 0.1
+  router_temp_anneal_iters: 50000
+  
+  # Regularization parameters
+  drop_path_rate: 0.2
+  feature_dropout_rate: 0.2
+  
+  # Loss weights
+  lambda_sparse: 0.01
+  lambda_consistency: 0.1
+  
+  # Dual forward for consistency loss
+  use_dual_forward: true
+

@@ -13,7 +13,8 @@ from .Mamba3D_utils.checkpoint import (
 )
 from .Mamba3D_utils.logger import *
 import random
-from knn_cuda import KNN
+# from knn_cuda import KNN
+from openpoints.models.layers.knn import KNN
 from fusion import FeatureFusion
 
 ### Mamba import start ###

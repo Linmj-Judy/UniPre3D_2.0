@@ -1,0 +1,57 @@
+defaults:
+  - /settings@_here_  # Superimpose the basic settings
+  - /dataset/scannet@_here_  # Superimpose the dataset settings
+
+general:
+  cuda: true
+  device: [0, 1, 2, 3]
+  random_seed: 42
+
+data:
+  fov: 49.13434264120263
+  training_resolution: 128
+  input_images: 8
+
+model:
+  backbone_type: ptv3
+  in_channels: 6
+  aug: false
+  offset_scale: 0.05
+
+opt:
+  iterations: 100000
+  mode: "train"
+  # use ScanNet dataset
+  level: "scene"
+  use_fusion: true
+  base_lr: 0.0001
+  batch_size: 4
+  test_generation_num: 1
+  loss: l2
+  step_lr: -1
+  lr_gamma: 1.0
+  start_lpips_after: 50000
+  
+  # ===== Improved Fusion Configuration =====
+  # Enable learnable gating for adaptive fusion
+  use_learnable_gating: true
+  
+  # Enable routing mechanism for scene-level
+  use_routing: true
+  
+  # Gumbel-Softmax temperature annealing
+  router_temp_start: 1.0
+  router_temp_end: 0.1
+  router_temp_anneal_iters: 50000
+  
+  # Regularization parameters (higher for scene-level)
+  drop_path_rate: 0.3
+  feature_dropout_rate: 0.2
+  
+  # Loss weights
+  lambda_sparse: 0.01
+  lambda_consistency: 0.1
+  
+  # Dual forward for consistency loss
+  use_dual_forward: true
+

@@ -4,4 +4,4 @@ data:
   zfar: 2
   category: shapenet
   white_background: false
-  dataset_root: /path/to/shapenet/dataset
+  dataset_root: /public/home/lingwang/lmj/UniPre3D/Shapenet_multiview/data1/datasets/center_renders
