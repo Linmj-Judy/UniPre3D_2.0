@@ -146,3 +146,4 @@ sd-vae-ft-mse-local/
 scannet_v2/
 experiments_out/
 recompute_lmj.ipynb
+*.bin
