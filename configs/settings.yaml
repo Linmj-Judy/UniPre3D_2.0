@@ -18,8 +18,8 @@ opt:
   pretrained_ckpt: null
 
   # Saves all image tensors in the memory when training. More memory-consuming but faster.
-  record_img: true
-  
+  record_img: true 
+
   # ===== Improved Fusion Strategy Configuration =====
   # Enable learnable gating mechanism for adaptive feature fusion
   use_learnable_gating: false

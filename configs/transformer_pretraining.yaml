@@ -25,7 +25,7 @@ opt:
   level: "object"
   use_fusion: true
   base_lr: 0.0001
-  batch_size: 32
+  batch_size: 8
   test_generation_num: 1
   loss: focal_l2
   non_bg_color_loss_rate: 4

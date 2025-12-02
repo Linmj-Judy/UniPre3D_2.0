@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import timm
-from timm.models.layers import DropPath, trunc_normal_
+from timm.layers import DropPath, trunc_normal_
 
 import numpy as np
 from .build_fn import MODELS
@@ -25,10 +25,10 @@ from torch import Tensor
 from typing import Optional
 
 from timm.models.vision_transformer import VisionTransformer, _cfg
-from timm.models.registry import register_model
-from timm.models.layers import trunc_normal_
+from timm.models import register_model
+from timm.layers import trunc_normal_
 
-from timm.models.layers import DropPath, PatchEmbed
+from timm.layers import DropPath, PatchEmbed
 from timm.models.vision_transformer import _load_weights
 
 import math

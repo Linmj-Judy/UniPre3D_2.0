@@ -10,7 +10,7 @@ from typing import Any, List, Optional, Tuple, Union, Dict
 
 from model.image_predictor import ImageFeaturePredictor
 from model.point_predictor import PointFeaturePredictor
-from timm.models.layers import trunc_normal_
+from timm.layers import trunc_normal_
 
 
 class GaussianSplatPredictor(nn.Module):

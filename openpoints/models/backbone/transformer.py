@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from timm.models.layers import DropPath
+from timm.layers import DropPath
 from openpoints.models.build import MODELS
 from openpoints.models.layers import SubsampleGroup
 from fusion import FeatureFusion

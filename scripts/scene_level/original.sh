@@ -9,9 +9,28 @@
 #SBATCH --chdir=/public/home/lingwang/lmj/UniPre3D
 #SBATCH --output=/public/home/lingwang/lmj/UniPre3D/logs/scene_level/original/%x_%j.out
 #SBATCH --error=/public/home/lingwang/lmj/UniPre3D/logs/scene_level/original/%x_%j.err
-#SBATCH --gres=gpu:1
+#SBATCH --gres=gpu:4
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=8
+
+source ~/lmj/.bashrc_cu12
+conda activate /public/home/lingwang/anaconda3/envs/UniPre3D
+cd /public/home/lingwang/lmj/UniPre3D
+
+# 限制OpenBLAS线程数以避免资源耗尽
+export OPENBLAS_NUM_THREADS=4
+export MKL_NUM_THREADS=4
+export OMP_NUM_THREADS=4
+export NUMEXPR_NUM_THREADS=4
+
+export TF_XLA_FLAGS=--tf_xla_enable_xla_devices
+export XLA_FLAGS=--xla_gpu_cuda_data_dir=/public/software/cuda/local/cuda-12.1
+export CUDA_HOME=/public/software/cuda/local/cuda-12.1
+export NVTE_CUDA_INCLUDE_PATH=/public/software/cuda/local/cuda-12.1/include  
+export PATH=/public/software/cuda/local/cuda-12.1/bin${PATH:+:${PATH}}
+export LD_LIBRARY_PATH=/public/software/cuda/local/cuda-12.1/targets/x86_64-linux/lib:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=/public/software/cuda/local/cuda-12.1/lib64${LD_LIBRARY_PATH+:${LD_LIBRARY_PATH}}
+
 
 
 # ============================================

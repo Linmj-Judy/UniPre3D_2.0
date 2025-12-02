@@ -123,7 +123,7 @@ class DataManager:
                 self.dataset,
                 batch_size=self.cfg.opt.batch_size,
                 shuffle=True,
-                drop_last=True,
+                drop_last=False,  # Allow incomplete batches for small datasets
                 **common_loader_params,
             )
 
@@ -661,11 +661,38 @@ def main(cfg: DictConfig):
         os.environ["TORCH_HOME"] = torch_home
 
 
-    multiprocessing.set_start_method("spawn")
+    # Only set multiprocessing start method if not already set and if needed
+    # This avoids conflicts with other libraries that may have already set it
+    try:
+        current_method = multiprocessing.get_start_method(allow_none=True)
+        if current_method is None:
+            # Start method not set, set it to spawn for CUDA compatibility
+            multiprocessing.set_start_method("spawn", force=False)
+    except RuntimeError:
+        # Start method already set by another process, skip
+        pass
+    
     if cfg.general.multiple_gpu:
+        # Check if enough GPUs are available
+        requested_gpus = len(cfg.general.device)
+        available_gpus = torch.cuda.device_count()
+        
+        if requested_gpus > available_gpus:
+            raise RuntimeError(
+                f"配置要求使用 {requested_gpus} 个 GPU，但只有 {available_gpus} 个 GPU 可用。\n"
+                f"请检查：\n"
+                f"1. SLURM 脚本中的 --gres=gpu: 设置是否正确（当前要求 {requested_gpus} 个）\n"
+                f"2. CUDA_VISIBLE_DEVICES 环境变量是否限制了可见的 GPU 数量\n"
+                f"3. 或者修改配置中的 general.device 参数以匹配实际可用的 GPU 数量"
+            )
+        
+        if requested_gpus != available_gpus:
+            print(f"警告: 配置要求 {requested_gpus} 个 GPU，实际可用 {available_gpus} 个 GPU。")
+            print(f"将使用前 {requested_gpus} 个 GPU: {list(cfg.general.device)}")
+        
         launch(
             main_worker,
-            num_gpus_per_machine=len(cfg.general.device),
+            num_gpus_per_machine=requested_gpus,
             dist_url="auto",
             cfg=(cfg,),
         )

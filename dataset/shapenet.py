@@ -67,6 +67,21 @@ class ShapeNetDataset(Dataset):
         self.record_img = cfg.opt.record_img
         self.now_rgbs = []
         self.transforms = [PointCloudRotationWithExtrinsic()]
+        
+        # Initialize storage dictionaries
+        self.all_rgbs = {}
+        self.all_world_view_transforms = {}
+        self.all_view_to_world_transforms = {}
+        self.all_full_proj_transforms = {}
+        self.all_camera_centers = {}
+        self.all_w2c = {}
+        self.all_pts = {}
+        if self.dataset_name == "test":
+            self.all_rolls = {}
+            self.all_pitches = {}
+        
+        # Track failed samples to avoid infinite recursion
+        self.failed_samples = set()
 
     def _initialize_metadata(self) -> List[str]:
         """
@@ -153,6 +168,8 @@ class ShapeNetDataset(Dataset):
         pts_paths = sorted(glob.glob(os.path.join(metadata_path, "pts", "*")))
 
         if len(rgb_paths) == 0:
+            # Mark this sample as failed to avoid infinite recursion
+            self.failed_samples.add(example_id)
             return None
 
         assert len(rgb_paths) == len(pose_paths), "Mismatch between RGB and pose files"
@@ -358,17 +375,45 @@ class ShapeNetDataset(Dataset):
             return
 
         # Convert to tensor and center the point cloud
-        tensor_data = (
-            torch.tensor(self.center_point_cloud(data), dtype=torch.float32)
-            .unsqueeze(0)
-            .to(f"cuda:{self.cfg.general.device}")
-        )
-
-        # Sample points using furthest point sampling
-        idx = furthest_point_sample(tensor_data[:3], 1024).long()
-
-        # Process point cloud based on input channel configuration
-        new_data = self._process_point_cloud(tensor_data, idx)
+        # NOTE: furthest_point_sample requires CUDA, so we need GPU here
+        # But we'll move result back to CPU to avoid DataLoader multiprocessing issues
+        tensor_data_cpu = torch.tensor(self.center_point_cloud(data), dtype=torch.float32).unsqueeze(0)
+        
+        # Check CUDA availability and initialize CUDA context safely
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA is not available but furthest_point_sample requires CUDA")
+        
+        # Use a specific CUDA device if available, otherwise use default
+        try:
+            # Get the current CUDA device (0 by default)
+            cuda_device = torch.cuda.current_device()
+            tensor_data = tensor_data_cpu.cuda(device=cuda_device)
+            
+            # Clear any previous CUDA errors
+            torch.cuda.synchronize()
+            
+            # Sample points using furthest_point sampling
+            # tensor_data shape: [1, N, 3] -> furthest_point_sample expects [B, N, 3] on CUDA
+            idx = furthest_point_sample(tensor_data, 1024).long()
+            
+            # Process point cloud based on input channel configuration
+            new_data = self._process_point_cloud(tensor_data, idx)
+            
+            # Move back to CPU for DataLoader compatibility
+            new_data = new_data.cpu()
+            
+            # Clean up GPU memory immediately
+            del tensor_data, idx
+            torch.cuda.empty_cache()
+            
+        except RuntimeError as e:
+            # If CUDA operation fails, clean up and re-raise
+            torch.cuda.empty_cache()
+            raise RuntimeError(f"CUDA operation failed in _load_point_cloud_data for {example_id}: {e}")
+        except Exception as e:
+            # For any other error, clean up and re-raise
+            torch.cuda.empty_cache()
+            raise RuntimeError(f"Error processing point cloud for {example_id}: {e}")
 
         # Store processed data
         self._store_processed_data(example_id, new_data)
@@ -509,9 +554,40 @@ class ShapeNetDataset(Dataset):
 
         # Load example data
         self.load_example_id(example_id, metadata_path)
-        if self.record_img and example_id not in self.all_rgbs:
-            print(f"Warning: {example_id} RGB info not found")
-            return self.__getitem__(random.randint(0, len(self.metadata) - 1))
+        
+        # Check if data was loaded successfully
+        # We need both RGB data (if record_img) and point cloud data
+        data_loaded = (not self.record_img or example_id in self.all_rgbs) and example_id in self.all_pts
+        
+        if not data_loaded:
+            print(f"Warning: {example_id} data not fully loaded (RGB: {example_id in self.all_rgbs}, PTS: {example_id in self.all_pts})")
+            # Avoid infinite recursion by trying limited number of times
+            max_attempts = 10
+            for attempt in range(max_attempts):
+                new_index = random.randint(0, len(self.metadata) - 1)
+                new_metadata_path = self.metadata[new_index]
+                new_parent_dir, new_category_instance_dir = os.path.split(new_metadata_path)
+                new_category, new_instance = os.path.split(new_parent_dir)
+                new_example_id = f"{new_instance}-{new_category_instance_dir}"
+                
+                # Skip if already known to be failed
+                if new_example_id in self.failed_samples:
+                    continue
+                
+                # Try loading this sample
+                self.load_example_id(new_example_id, new_metadata_path)
+                
+                # Check if both RGB and point cloud data are available
+                new_data_loaded = (not self.record_img or new_example_id in self.all_rgbs) and new_example_id in self.all_pts
+                if new_data_loaded:
+                    # Successfully loaded, update current example_id and metadata_path
+                    example_id = new_example_id
+                    metadata_path = new_metadata_path
+                    break
+            else:
+                # All attempts failed, raise error
+                raise RuntimeError(f"Failed to load any valid sample after {max_attempts} attempts. "
+                                   f"Failed samples: {len(self.failed_samples)}/{len(self.metadata)}")
 
         # Get frame indices based on dataset type
         frame_indices = self._get_frame_indices(example_id)
@@ -521,7 +597,7 @@ class ShapeNetDataset(Dataset):
 
         pts_to_be_transformed = {
             "pos": self.all_pts[example_id],
-            "extrinsic": self.all_w2c[example_id][frame_indices].clone().cuda(),
+            "extrinsic": self.all_w2c[example_id][frame_indices].clone(),
         }
 
         # Apply augmentation if needed

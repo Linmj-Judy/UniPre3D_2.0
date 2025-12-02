@@ -18,6 +18,12 @@ source ~/lmj/.bashrc_cu12
 conda activate /public/home/lingwang/anaconda3/envs/UniPre3D
 cd /public/home/lingwang/lmj/UniPre3D
 
+# 限制OpenBLAS线程数以避免资源耗尽
+export OPENBLAS_NUM_THREADS=4
+export MKL_NUM_THREADS=4
+export OMP_NUM_THREADS=4
+export NUMEXPR_NUM_THREADS=4
+
 export TF_XLA_FLAGS=--tf_xla_enable_xla_devices
 export XLA_FLAGS=--xla_gpu_cuda_data_dir=/public/software/cuda/local/cuda-12.1
 export CUDA_HOME=/public/software/cuda/local/cuda-12.1

@@ -4,7 +4,7 @@ from functools import partial
 
 from mamba_ssm.modules.mamba_simple import Mamba
 from mamba_ssm.ops.triton.layernorm import RMSNorm, layer_norm_fn, rms_norm_fn
-from timm.models.layers import DropPath
+from timm.layers import DropPath
 
 
 class MambaBlock(nn.Module):
