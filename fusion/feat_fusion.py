@@ -29,14 +29,27 @@ class FeatureFusion:
         Args:
             center (torch.Tensor): 3D points in world space [B, N, 3]
             c2w_matrix (torch.Tensor): Camera-to-world matrix [B, 4, 4]
-            intrinsic (torch.Tensor): Camera intrinsic matrix [B, 3, 3]
+            intrinsic (torch.Tensor): Camera intrinsic matrix [3, 3] or [3, 4] or [B, 3, 3]
 
         Returns:
             tuple: Projected pixel coordinates and depth values
         """
+        # Ensure intrinsic is on the correct device
+        device = center.device
+        intrinsic = intrinsic.to(device)
+        
+        # Handle different intrinsic shapes: [3, 4] -> [3, 3], or [3, 3] -> [3, 3]
+        if intrinsic.dim() == 2:
+            # If intrinsic is [3, 4], extract first 3 columns to get [3, 3]
+            if intrinsic.shape[1] == 4:
+                intrinsic = intrinsic[:, :3]
+            # Ensure it's [3, 3]
+            if intrinsic.shape != (3, 3):
+                raise ValueError(f"Expected intrinsic shape [3, 3] or [3, 4], got {intrinsic.shape}")
+        
         # Add homogeneous coordinate
         coords_homogeneous = torch.concatenate(
-            [center, torch.ones([*center.shape[:2], 1], device=center.device)], dim=2
+            [center, torch.ones([*center.shape[:2], 1], device=device)], dim=2
         )
         # Transform points from world to camera space
         w2c_matrix = torch.linalg.inv(c2w_matrix.permute(0, 2, 1))
@@ -45,13 +58,19 @@ class FeatureFusion:
         ).transpose(1, 2)
 
         # Perspective projection
+        # intrinsic is [3, 3], extract fx, fy, cx, cy
+        fx = intrinsic[0, 0]
+        fy = intrinsic[1, 1]
+        cx = intrinsic[0, 2]
+        cy = intrinsic[1, 2]
+        
         pixel_coords = camera_points.clone()
         pixel_coords[..., 0] = (
-            camera_points[..., 0] * intrinsic[0][0]
-        ) / camera_points[..., 2] + intrinsic[0][2]
+            camera_points[..., 0] * fx
+        ) / camera_points[..., 2] + cx
         pixel_coords[..., 1] = (
-            camera_points[..., 1] * intrinsic[1][1]
-        ) / camera_points[..., 2] + intrinsic[1][2]
+            camera_points[..., 1] * fy
+        ) / camera_points[..., 2] + cy
 
         return torch.round(pixel_coords[..., :2]).long(), camera_points[..., 2]
 
@@ -71,13 +90,19 @@ class FeatureFusion:
             center (torch.Tensor): 3D points in world space [B, N, 3]
             image_features (torch.Tensor): Image features from UNet decoder [B, C, H, W]
             c2w_projection_matrix (torch.Tensor): Camera-to-world matrix [B, 4, 4]
-            intrinsic (torch.Tensor): Camera intrinsic matrix [B, 3, 3]
+            intrinsic (torch.Tensor): Camera intrinsic matrix [3, 3] or [3, 4] or [B, 3, 3]
 
         Returns:
             torch.Tensor: Fused features [B, C', N]
         """
         B, N = center.shape[:2]
         C, H, W = image_features.shape[1:]
+
+        # Ensure all tensors are on the same device
+        device = center.device
+        image_features = image_features.to(device)
+        c2w_projection_matrix = c2w_projection_matrix.to(device)
+        intrinsic = intrinsic.to(device)
 
         if c2w_projection_matrix.dim() == 4:
             c2w_projection_matrix = c2w_projection_matrix[:, 0]

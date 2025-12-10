@@ -3,6 +3,8 @@ import torch.nn as nn
 
 import math
 import numpy as np
+import traceback
+import sys
 
 import spconv.pytorch as spconv
 
@@ -11,6 +13,15 @@ from typing import Any, List, Optional, Tuple, Union, Dict
 from model.image_predictor import ImageFeaturePredictor
 from model.point_predictor import PointFeaturePredictor
 from timm.layers import trunc_normal_
+
+
+def safe_print(msg):
+    """安全的打印函数，避免在多进程环境中出现问题"""
+    try:
+        print(msg, flush=True)
+        sys.stdout.flush()
+    except:
+        pass
 
 
 class GaussianSplatPredictor(nn.Module):
@@ -74,7 +85,9 @@ class GaussianSplatPredictor(nn.Module):
 
         # Initialize camera intrinsics for fusion mode
         if self.use_fusion and self.cfg.opt.level == "object":
-            self.intrinsic = self._get_camera_intrinsics()
+            intrinsic_tensor = self._get_camera_intrinsics()
+            # 注册为buffer，确保自动移动到正确的设备
+            self.register_buffer("intrinsic", intrinsic_tensor)
 
     def forward(
         self,
@@ -85,29 +98,118 @@ class GaussianSplatPredictor(nn.Module):
         links: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         """Forward pass through the network"""
-        if self.use_fusion:
-            return self._forward_fusion(
-                point_cloud,
-                image,
-                source_cameras_view_to_world,
-                unprojected_coords,
-            )
-        else:
-            return self._forward_basic(point_cloud, source_cameras_view_to_world)
+        try:
+            safe_print(f"[GaussianSplatPredictor] forward() 开始")
+            safe_print(f"[GaussianSplatPredictor] use_fusion={self.use_fusion}")
+
+            # 检查输入
+            if isinstance(point_cloud, dict):
+                safe_print(f"[GaussianSplatPredictor] point_cloud是字典，键: {list(point_cloud.keys())}")
+                for k, v in point_cloud.items():
+                    if isinstance(v, torch.Tensor):
+                        safe_print(f"[GaussianSplatPredictor] point_cloud['{k}'] 形状: {v.shape}, dtype: {v.dtype}, device: {v.device}")
+            else:
+                safe_print(f"[GaussianSplatPredictor] point_cloud形状: {point_cloud.shape}, dtype: {point_cloud.dtype}, device: {point_cloud.device}")
+
+            if source_cameras_view_to_world is not None:
+                safe_print(f"[GaussianSplatPredictor] source_cameras_view_to_world形状: {source_cameras_view_to_world.shape}")
+
+            if self.use_fusion:
+                safe_print(f"[GaussianSplatPredictor] 调用 _forward_fusion")
+                result = self._forward_fusion(
+                    point_cloud,
+                    image,
+                    source_cameras_view_to_world,
+                    unprojected_coords,
+                )
+                safe_print(f"[GaussianSplatPredictor] _forward_fusion 完成")
+                return result
+            else:
+                safe_print(f"[GaussianSplatPredictor] 调用 _forward_basic")
+                result = self._forward_basic(point_cloud, source_cameras_view_to_world)
+                safe_print(f"[GaussianSplatPredictor] _forward_basic 完成")
+                return result
+        except Exception as e:
+            safe_print(f"[GaussianSplatPredictor] forward() 失败: {str(e)}")
+            safe_print(f"[GaussianSplatPredictor] 错误堆栈:\n{traceback.format_exc()}")
+            if torch.cuda.is_available():
+                safe_print(f"[GaussianSplatPredictor] GPU内存使用: {torch.cuda.memory_allocated()/1024**3:.2f} GB / {torch.cuda.memory_reserved()/1024**3:.2f} GB")
+            raise
 
     def _forward_basic(self, point_cloud, source_cameras_view_to_world):
         """Forward pass for basic network"""
-        B = source_cameras_view_to_world.shape[0]
-        N_views = 1
+        try:
+            safe_print(f"[GaussianSplatPredictor] _forward_basic() 开始")
+            B = source_cameras_view_to_world.shape[0]
+            N_views = 1
+            safe_print(f"[GaussianSplatPredictor] batch_size={B}, N_views={N_views}")
 
-        # Process network output
-        point_output, center = self.point_network(point_cloud)
+            # 检查 point_cloud
+            if isinstance(point_cloud, dict):
+                safe_print(f"[GaussianSplatPredictor] point_cloud字典键: {list(point_cloud.keys())}")
+                for k, v in point_cloud.items():
+                    if isinstance(v, torch.Tensor):
+                        safe_print(f"[GaussianSplatPredictor] point_cloud['{k}']: shape={v.shape}, dtype={v.dtype}, device={v.device}, is_contiguous={v.is_contiguous()}")
+            else:
+                safe_print(f"[GaussianSplatPredictor] point_cloud: shape={point_cloud.shape}, dtype={point_cloud.dtype}, device={point_cloud.device}, is_contiguous={point_cloud.is_contiguous()}")
 
-        # Generate final output
-        network_output = point_output.split(self.split_dimensions, dim=1)
-        return self._process_output(
-            network_output, center, B, N_views, source_cameras_view_to_world
-        )
+            # 检查 point_network
+            safe_print(f"[GaussianSplatPredictor] point_network类型: {type(self.point_network)}")
+            safe_print(f"[GaussianSplatPredictor] point_network设备: {next(self.point_network.parameters()).device if list(self.point_network.parameters()) else 'N/A'}")
+
+            # 同步CUDA操作，确保之前的操作完成
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+                safe_print(f"[GaussianSplatPredictor] CUDA同步完成")
+
+            # Process network output - 这是最可能出问题的地方
+            safe_print(f"[GaussianSplatPredictor] 准备调用 point_network.forward()...")
+            try:
+                point_output, center = self.point_network(point_cloud)
+                safe_print(f"[GaussianSplatPredictor] point_network.forward() 调用成功")
+                safe_print(f"[GaussianSplatPredictor] point_output形状: {point_output.shape}, dtype: {point_output.dtype}, device: {point_output.device}")
+                safe_print(f"[GaussianSplatPredictor] center形状: {center.shape if center is not None else None}, dtype: {center.dtype if center is not None else None}, device: {center.device if center is not None else None}")
+            except Exception as e:
+                safe_print(f"[GaussianSplatPredictor] point_network.forward() 调用失败: {str(e)}")
+                safe_print(f"[GaussianSplatPredictor] 错误堆栈:\n{traceback.format_exc()}")
+                if torch.cuda.is_available():
+                    safe_print(f"[GaussianSplatPredictor] GPU内存使用: {torch.cuda.memory_allocated()/1024**3:.2f} GB / {torch.cuda.memory_reserved()/1024**3:.2f} GB")
+                raise
+
+            # 同步CUDA操作
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+                safe_print(f"[GaussianSplatPredictor] point_network调用后CUDA同步完成")
+
+            # Generate final output
+            safe_print(f"[GaussianSplatPredictor] 开始split操作，split_dimensions={self.split_dimensions}")
+            try:
+                network_output = point_output.split(self.split_dimensions, dim=1)
+                safe_print(f"[GaussianSplatPredictor] split完成，输出数量: {len(network_output)}")
+                for i, out in enumerate(network_output):
+                    safe_print(f"[GaussianSplatPredictor] network_output[{i}]形状: {out.shape}")
+            except Exception as e:
+                safe_print(f"[GaussianSplatPredictor] split操作失败: {str(e)}")
+                safe_print(f"[GaussianSplatPredictor] 错误堆栈:\n{traceback.format_exc()}")
+                raise
+
+            safe_print(f"[GaussianSplatPredictor] 准备调用 _process_network_output")
+            try:
+                result = self._process_network_output(
+                    network_output, center, None, is_scene_level=False
+                )
+                safe_print(f"[GaussianSplatPredictor] _process_network_output完成，输出键: {list(result.keys()) if isinstance(result, dict) else 'N/A'}")
+                return result
+            except Exception as e:
+                safe_print(f"[GaussianSplatPredictor] _process_network_output失败: {str(e)}")
+                safe_print(f"[GaussianSplatPredictor] 错误堆栈:\n{traceback.format_exc()}")
+                raise
+        except Exception as e:
+            safe_print(f"[GaussianSplatPredictor] _forward_basic() 失败: {str(e)}")
+            safe_print(f"[GaussianSplatPredictor] 完整错误堆栈:\n{traceback.format_exc()}")
+            if torch.cuda.is_available():
+                safe_print(f"[GaussianSplatPredictor] GPU内存使用: {torch.cuda.memory_allocated()/1024**3:.2f} GB / {torch.cuda.memory_reserved()/1024**3:.2f} GB")
+            raise
 
     def _forward_fusion(
         self,
@@ -127,47 +229,165 @@ class GaussianSplatPredictor(nn.Module):
         Returns:
             Dictionary containing processed features and parameters
         """
-        B = image.shape[0]
-        N_views = image.shape[1]
+        try:
+            safe_print(f"[GaussianSplatPredictor] _forward_fusion() 开始")
+            
+            # 检查输入
+            safe_print(f"[GaussianSplatPredictor] image形状: {image.shape}, dtype: {image.dtype}, device: {image.device}")
+            if isinstance(point_cloud, dict):
+                safe_print(f"[GaussianSplatPredictor] point_cloud是字典，键: {list(point_cloud.keys())}")
+                for k, v in point_cloud.items():
+                    if isinstance(v, torch.Tensor):
+                        safe_print(f"[GaussianSplatPredictor] point_cloud['{k}']: shape={v.shape}, dtype={v.dtype}, device={v.device}, is_contiguous={v.is_contiguous()}")
+            
+            B = image.shape[0]
+            N_views = image.shape[1]
+            safe_print(f"[GaussianSplatPredictor] B={B}, N_views={N_views}, level={self.cfg.opt.level}")
 
-        # Process image features
-        image = image.reshape(B * N_views, *image.shape[2:])
+            # Process image features
+            safe_print(f"[GaussianSplatPredictor] 步骤1: 重塑图像...")
+            try:
+                image = image.reshape(B * N_views, *image.shape[2:])
+                safe_print(f"[GaussianSplatPredictor] 图像重塑完成，新形状: {image.shape}")
+            except Exception as e:
+                safe_print(f"[GaussianSplatPredictor] 图像重塑失败: {str(e)}")
+                raise
 
-        image_output = self.image_network.forward(image)
+            # 同步CUDA
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+                safe_print(f"[GaussianSplatPredictor] CUDA同步完成（图像重塑后）")
 
-        # Generate image features
-        image_features = self.image_conv.forward(image_output["decoder_block_3"])
+            # 调用image_network
+            safe_print(f"[GaussianSplatPredictor] 步骤2: 调用image_network.forward()...")
+            try:
+                image_output = self.image_network.forward(image)
+                safe_print(f"[GaussianSplatPredictor] image_network.forward()完成，输出键: {list(image_output.keys())}")
+            except Exception as e:
+                safe_print(f"[GaussianSplatPredictor] image_network.forward()失败: {str(e)}")
+                safe_print(f"[GaussianSplatPredictor] 错误堆栈:\n{traceback.format_exc()}")
+                raise
 
-        # Process point cloud features based on optimization level
-        if self.cfg.opt.level == "object":
-            point_features, center = self.point_network.forward_feat_fusion(
-                point_cloud,
-                image_features,
-                source_cameras_view_to_world,
-                self.fusion_mlps,
-                self.intrinsic,
-            )
-            network_output = point_features.split(self.split_dimensions, dim=1)
-            out_dict = self._process_network_output(
-                network_output, center, None, is_scene_level=False
-            )
-            out_dict = self._multi_view_union(out_dict, B, N_views)
-            return self._make_contiguous(out_dict)
+            # 同步CUDA
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+                safe_print(f"[GaussianSplatPredictor] CUDA同步完成（image_network后）")
 
-        elif self.cfg.opt.level == "scene":
-            point_features, indices = self.point_network.forward_point_fusion(
-                point_cloud,
-                image_features,
-                unprojected_coords,
-                self.fusion_mlps,
-            )
-            network_output = point_features.split(self.split_dimensions, dim=1)
-            return self._process_network_output(
-                network_output, point_cloud["coord"], indices, is_scene_level=True
-            )
+            # Generate image features
+            safe_print(f"[GaussianSplatPredictor] 步骤3: 调用image_conv.forward()...")
+            try:
+                decoder_block_3 = image_output["decoder_block_3"]
+                safe_print(f"[GaussianSplatPredictor] decoder_block_3形状: {decoder_block_3.shape}")
+                image_features = self.image_conv.forward(decoder_block_3)
+                safe_print(f"[GaussianSplatPredictor] image_conv.forward()完成，image_features形状: {image_features.shape}")
+            except Exception as e:
+                safe_print(f"[GaussianSplatPredictor] image_conv.forward()失败: {str(e)}")
+                safe_print(f"[GaussianSplatPredictor] 错误堆栈:\n{traceback.format_exc()}")
+                raise
 
-        else:
-            raise ValueError("Invalid optimization level")
+            # 同步CUDA
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+                safe_print(f"[GaussianSplatPredictor] CUDA同步完成（image_conv后）")
+
+            # Process point cloud features based on optimization level
+            if self.cfg.opt.level == "object":
+                safe_print(f"[GaussianSplatPredictor] 步骤4: object级别处理，准备调用point_network.forward_feat_fusion()...")
+                safe_print(f"[GaussianSplatPredictor] 参数检查:")
+                safe_print(f"[GaussianSplatPredictor]   - point_cloud: {type(point_cloud)}")
+                safe_print(f"[GaussianSplatPredictor]   - image_features形状: {image_features.shape}")
+                safe_print(f"[GaussianSplatPredictor]   - source_cameras_view_to_world形状: {source_cameras_view_to_world.shape if source_cameras_view_to_world is not None else None}")
+                safe_print(f"[GaussianSplatPredictor]   - fusion_mlps类型: {type(self.fusion_mlps)}")
+                
+                # 确保intrinsic在正确的设备上
+                intrinsic = self.intrinsic
+                if isinstance(intrinsic, torch.Tensor):
+                    # 确保intrinsic在image_features相同的设备上
+                    if intrinsic.device != image_features.device:
+                        safe_print(f"[GaussianSplatPredictor] 警告: intrinsic设备({intrinsic.device})与image_features设备({image_features.device})不一致，正在移动...")
+                        intrinsic = intrinsic.to(image_features.device)
+                    safe_print(f"[GaussianSplatPredictor]   - intrinsic形状: {intrinsic.shape}, dtype: {intrinsic.dtype}, device: {intrinsic.device}")
+                else:
+                    safe_print(f"[GaussianSplatPredictor]   - intrinsic类型: {type(intrinsic)}")
+                
+                try:
+                    point_features, center = self.point_network.forward_feat_fusion(
+                        point_cloud,
+                        image_features,
+                        source_cameras_view_to_world,
+                        self.fusion_mlps,
+                        intrinsic,  # 使用确保在正确设备上的intrinsic
+                    )
+                    safe_print(f"[GaussianSplatPredictor] point_network.forward_feat_fusion()完成")
+                    safe_print(f"[GaussianSplatPredictor] point_features形状: {point_features.shape}, center形状: {center.shape if center is not None else None}")
+                except Exception as e:
+                    safe_print(f"[GaussianSplatPredictor] point_network.forward_feat_fusion()失败: {str(e)}")
+                    safe_print(f"[GaussianSplatPredictor] 错误堆栈:\n{traceback.format_exc()}")
+                    if torch.cuda.is_available():
+                        safe_print(f"[GaussianSplatPredictor] GPU内存使用: {torch.cuda.memory_allocated()/1024**3:.2f} GB / {torch.cuda.memory_reserved()/1024**3:.2f} GB")
+                    raise
+
+                # 同步CUDA
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                    safe_print(f"[GaussianSplatPredictor] CUDA同步完成（forward_feat_fusion后）")
+
+                safe_print(f"[GaussianSplatPredictor] 步骤5: split操作...")
+                try:
+                    network_output = point_features.split(self.split_dimensions, dim=1)
+                    safe_print(f"[GaussianSplatPredictor] split完成，输出数量: {len(network_output)}")
+                except Exception as e:
+                    safe_print(f"[GaussianSplatPredictor] split失败: {str(e)}")
+                    raise
+
+                safe_print(f"[GaussianSplatPredictor] 步骤6: _process_network_output...")
+                try:
+                    out_dict = self._process_network_output(
+                        network_output, center, None, is_scene_level=False
+                    )
+                    safe_print(f"[GaussianSplatPredictor] _process_network_output完成")
+                except Exception as e:
+                    safe_print(f"[GaussianSplatPredictor] _process_network_output失败: {str(e)}")
+                    raise
+
+                safe_print(f"[GaussianSplatPredictor] 步骤7: _multi_view_union...")
+                try:
+                    out_dict = self._multi_view_union(out_dict, B, N_views)
+                    safe_print(f"[GaussianSplatPredictor] _multi_view_union完成")
+                except Exception as e:
+                    safe_print(f"[GaussianSplatPredictor] _multi_view_union失败: {str(e)}")
+                    raise
+
+                safe_print(f"[GaussianSplatPredictor] 步骤8: _make_contiguous...")
+                try:
+                    result = self._make_contiguous(out_dict)
+                    safe_print(f"[GaussianSplatPredictor] _make_contiguous完成")
+                    return result
+                except Exception as e:
+                    safe_print(f"[GaussianSplatPredictor] _make_contiguous失败: {str(e)}")
+                    raise
+
+            elif self.cfg.opt.level == "scene":
+                safe_print(f"[GaussianSplatPredictor] scene级别处理...")
+                point_features, indices = self.point_network.forward_point_fusion(
+                    point_cloud,
+                    image_features,
+                    unprojected_coords,
+                    self.fusion_mlps,
+                )
+                network_output = point_features.split(self.split_dimensions, dim=1)
+                return self._process_network_output(
+                    network_output, point_cloud["coord"], indices, is_scene_level=True
+                )
+
+            else:
+                raise ValueError("Invalid optimization level")
+        except Exception as e:
+            safe_print(f"[GaussianSplatPredictor] _forward_fusion() 失败: {str(e)}")
+            safe_print(f"[GaussianSplatPredictor] 完整错误堆栈:\n{traceback.format_exc()}")
+            if torch.cuda.is_available():
+                safe_print(f"[GaussianSplatPredictor] GPU内存使用: {torch.cuda.memory_allocated()/1024**3:.2f} GB / {torch.cuda.memory_reserved()/1024**3:.2f} GB")
+            raise
 
     def _get_network_params(self):
         """Get network parameters for initialization"""
@@ -274,7 +494,9 @@ class GaussianSplatPredictor(nn.Module):
         intrinsics[0, 2] = res / 2.0
         intrinsics[1, 2] = res / 2.0
 
-        return intrinsics
+        # 转换为torch.Tensor并注册为buffer，确保在正确的设备上
+        intrinsics_tensor = torch.from_numpy(intrinsics).float()
+        return intrinsics_tensor
 
     def _process_network_output(
         self,

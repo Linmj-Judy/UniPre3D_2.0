@@ -10,6 +10,29 @@ Key features:
 """
 
 import os
+import sys
+import faulthandler
+import signal
+
+# Enable faulthandler to catch segmentation faults
+# This will print a Python traceback when a segfault occurs
+faulthandler.enable()
+# Also dump traceback to file
+faulthandler.dump_traceback_later(timeout=1, exit=False)
+
+# Register signal handler for SIGSEGV (segmentation fault)
+def segfault_handler(signum, frame):
+    print("\n" + "="*80)
+    print("SEGMENTATION FAULT DETECTED!")
+    print("="*80)
+    import traceback
+    traceback.print_stack(frame)
+    print("\n" + "="*80)
+    faulthandler.dump_traceback()
+    sys.exit(1)
+
+signal.signal(signal.SIGSEGV, segfault_handler)
+
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
@@ -21,6 +44,8 @@ import pointcept.utils.comm as comm
 from pointcept.engines.launch import launch
 from pointcept.engines.defaults import create_ddp_model, worker_init_fn
 from pointcept.datasets import point_collate_fn
+import traceback
+import sys
 
 from model.gaussian_predictor import GaussianSplatPredictor
 from dataset.dataset_factory import get_dataset
@@ -44,6 +69,15 @@ import multiprocessing
 from logger import Logger
 
 
+def safe_print(msg):
+    """安全的打印函数，避免在多进程环境中出现问题"""
+    try:
+        print(msg, flush=True)
+        sys.stdout.flush()
+    except:
+        pass
+
+
 class DataManager:
     """Manages all data loading and processing operations"""
 
@@ -54,9 +88,20 @@ class DataManager:
 
     def setup_dataloaders(self) -> None:
         """Initialize all data loaders"""
-        self.dataset = get_dataset(self.cfg, "train", device=self.device)
-        self.val_dataset = get_dataset(self.cfg, "val", device=self.device)
-        self.test_dataset = get_dataset(self.cfg, "test", device=self.device)
+        try:
+            safe_print("[DataManager] 开始初始化数据集...")
+            self.dataset = get_dataset(self.cfg, "train", device=self.device)
+            safe_print(f"[DataManager] 训练集初始化完成，大小: {len(self.dataset)}")
+            
+            self.val_dataset = get_dataset(self.cfg, "val", device=self.device)
+            safe_print(f"[DataManager] 验证集初始化完成，大小: {len(self.val_dataset)}")
+            
+            self.test_dataset = get_dataset(self.cfg, "test", device=self.device)
+            safe_print(f"[DataManager] 测试集初始化完成，大小: {len(self.test_dataset)}")
+        except Exception as e:
+            safe_print(f"[DataManager] 数据集初始化失败: {str(e)}")
+            safe_print(f"[DataManager] 错误堆栈:\n{traceback.format_exc()}")
+            raise
 
         # Setup distributed sampling
         self.train_sampler = (
@@ -155,20 +200,30 @@ class ModelManager:
         self,
     ) -> Tuple[torch.nn.Module, torch.optim.Optimizer]:
         """Create and initialize model and optimizer"""
+        try:
+            safe_print("[ModelManager] 开始创建模型...")
+            model_class = GaussianSplatPredictor
+            model = model_class(self.cfg)
+            safe_print("[ModelManager] 模型创建完成")
 
-        model_class = GaussianSplatPredictor
-        model = model_class(self.cfg)
-
-        optimizer_params = self._get_optimizer_params(model)
-        optimizer = torch.optim.AdamW(
-            optimizer_params, lr=0.0, eps=1e-15, betas=self.cfg.opt.betas
-        )
-        scheduler = None
-        if self.cfg.opt.step_lr != -1:
-            scheduler = torch.optim.lr_scheduler.StepLR(
-                optimizer, step_size=self.cfg.opt.step_lr, gamma=self.cfg.opt.lr_gamma
+            safe_print("[ModelManager] 开始创建优化器...")
+            optimizer_params = self._get_optimizer_params(model)
+            optimizer = torch.optim.AdamW(
+                optimizer_params, lr=0.0, eps=1e-15, betas=self.cfg.opt.betas
             )
-        return model, optimizer, scheduler
+            safe_print("[ModelManager] 优化器创建完成")
+            
+            scheduler = None
+            if self.cfg.opt.step_lr != -1:
+                scheduler = torch.optim.lr_scheduler.StepLR(
+                    optimizer, step_size=self.cfg.opt.step_lr, gamma=self.cfg.opt.lr_gamma
+                )
+                safe_print("[ModelManager] 学习率调度器创建完成")
+            return model, optimizer, scheduler
+        except Exception as e:
+            safe_print(f"[ModelManager] 模型/优化器创建失败: {str(e)}")
+            safe_print(f"[ModelManager] 错误堆栈:\n{traceback.format_exc()}")
+            raise
 
     def _get_optimizer_params(self, model: torch.nn.Module) -> List[Dict]:
         """Get optimizer parameters based on model type"""
@@ -338,23 +393,46 @@ class Trainer:
     """Main trainer class that orchestrates the training process"""
 
     def __init__(self, cfg: DictConfig):
-        self.vis_dir = os.getcwd()
-        self.device = safe_state(cfg)
-        self.cfg = cfg
+        try:
+            safe_print("[Trainer] 开始初始化Trainer...")
+            self.vis_dir = os.getcwd()
+            safe_print(f"[Trainer] 工作目录: {self.vis_dir}")
+            
+            safe_print("[Trainer] 初始化设备状态...")
+            self.device = safe_state(cfg)
+            safe_print(f"[Trainer] 设备: {self.device}")
+            self.cfg = cfg
 
-        # Initialize components
-        self.logger = Logger(cfg, self.vis_dir)
-        self.data_manager = DataManager(cfg, self.device)
-        self.model_manager = ModelManager(cfg, self.device)
-        self.validation_manager = ValidationManager(cfg, self.device, self.logger)
+            # Initialize components
+            safe_print("[Trainer] 初始化Logger...")
+            self.logger = Logger(cfg, self.vis_dir)
+            safe_print("[Trainer] Logger初始化完成")
+            
+            safe_print("[Trainer] 初始化DataManager...")
+            self.data_manager = DataManager(cfg, self.device)
+            safe_print("[Trainer] DataManager初始化完成")
+            
+            safe_print("[Trainer] 初始化ModelManager...")
+            self.model_manager = ModelManager(cfg, self.device)
+            safe_print("[Trainer] ModelManager初始化完成")
+            
+            safe_print("[Trainer] 初始化ValidationManager...")
+            self.validation_manager = ValidationManager(cfg, self.device, self.logger)
+            safe_print("[Trainer] ValidationManager初始化完成")
 
-        self.best_psnr = 0.0
-        
-        # Initialize router temperature annealing if routing is enabled
-        if getattr(cfg.opt, 'use_routing', False):
-            self.router_temp_start = cfg.opt.router_temp_start
-            self.router_temp_end = cfg.opt.router_temp_end
-            self.router_temp_anneal_iters = cfg.opt.router_temp_anneal_iters
+            self.best_psnr = 0.0
+            
+            # Initialize router temperature annealing if routing is enabled
+            if getattr(cfg.opt, 'use_routing', False):
+                self.router_temp_start = cfg.opt.router_temp_start
+                self.router_temp_end = cfg.opt.router_temp_end
+                self.router_temp_anneal_iters = cfg.opt.router_temp_anneal_iters
+            
+            safe_print("[Trainer] Trainer初始化完成！")
+        except Exception as e:
+            safe_print(f"[Trainer] Trainer初始化失败: {str(e)}")
+            safe_print(f"[Trainer] 错误堆栈:\n{traceback.format_exc()}")
+            raise
 
     def train(self) -> None:
         """Main training loop"""
@@ -445,45 +523,87 @@ class Trainer:
         rendered_images = []
         gt_images = []
 
-        # Set background color based on configuration
-        background = torch.tensor(
-            [1, 1, 1] if self.cfg.data.white_background else [0, 0, 0],
-            dtype=torch.float32,
-            device=self.device,
-        )
+        try:
+            # Set background color based on configuration
+            background = torch.tensor(
+                [1, 1, 1] if self.cfg.data.white_background else [0, 0, 0],
+                dtype=torch.float32,
+                device=self.device,
+            )
 
-        # Process each batch
-        for b_idx in range(data["gt_images"].shape[0]):
-            # Extract gaussian parameters for current batch
-            gaussian_splat_batch = {
-                k: v[b_idx].contiguous()
-                for k, v in gaussian_splats.items()
-                if len(v.shape) > 1
-            }
+            batch_size = data["gt_images"].shape[0]
+            num_views = data["gt_images"].shape[1]
+            safe_print(f"[Trainer] 渲染验证视图: batch_size={batch_size}, num_views={num_views}, input_images={self.cfg.data.input_images}")
 
-            # Render each validation view
-            for r_idx in range(self.cfg.data.input_images, data["gt_images"].shape[1]):
-                # Render the novel view
-                image = render_predicted(
-                    gaussian_splat_batch,
-                    data["world_view_transforms"][b_idx, r_idx].to(self.device),
-                    data["full_proj_transforms"][b_idx, r_idx].to(self.device),
-                    data["camera_centers"][b_idx, r_idx].to(self.device),
-                    background,
-                    self.cfg,
-                    focals_pixels=None,
-                )["render"]
+            # Process each batch
+            for b_idx in range(batch_size):
+                safe_print(f"[Trainer] 处理批次 {b_idx}/{batch_size}...")
+                try:
+                    # Extract gaussian parameters for current batch
+                    gaussian_splat_batch = {
+                        k: v[b_idx].contiguous()
+                        for k, v in gaussian_splats.items()
+                        if len(v.shape) > 1
+                    }
+                    safe_print(f"[Trainer] 批次 {b_idx}: Gaussian splat参数提取完成，键: {list(gaussian_splat_batch.keys())}")
+                    
+                    # 检查参数形状
+                    for k, v in gaussian_splat_batch.items():
+                        safe_print(f"[Trainer] 批次 {b_idx}: {k} 形状: {v.shape}, dtype: {v.dtype}, device: {v.device}")
 
-                gt_image = data["gt_images"][b_idx, r_idx].to(self.device)
+                    # Render each validation view
+                    for r_idx in range(self.cfg.data.input_images, num_views):
+                        safe_print(f"[Trainer] 批次 {b_idx}, 视图 {r_idx}/{num_views}: 开始渲染...")
+                        try:
+                            # 检查变换矩阵
+                            world_view = data["world_view_transforms"][b_idx, r_idx].to(self.device)
+                            full_proj = data["full_proj_transforms"][b_idx, r_idx].to(self.device)
+                            camera_center = data["camera_centers"][b_idx, r_idx].to(self.device)
+                            
+                            safe_print(f"[Trainer] 批次 {b_idx}, 视图 {r_idx}: 变换矩阵形状 - world_view: {world_view.shape}, full_proj: {full_proj.shape}, camera_center: {camera_center.shape}")
+                            
+                            # 渲染
+                            render_result = render_predicted(
+                                gaussian_splat_batch,
+                                world_view,
+                                full_proj,
+                                camera_center,
+                                background,
+                                self.cfg,
+                                focals_pixels=None,
+                            )
+                            
+                            image = render_result["render"]
+                            safe_print(f"[Trainer] 批次 {b_idx}, 视图 {r_idx}: 渲染完成，图像形状: {image.shape}")
 
-                rendered_images.append(image)
-                gt_images.append(gt_image)
+                            gt_image = data["gt_images"][b_idx, r_idx].to(self.device)
 
-        # Stack all images into tensors
-        rendered_images = torch.stack(rendered_images, dim=0)
-        gt_images = torch.stack(gt_images, dim=0)
+                            rendered_images.append(image)
+                            gt_images.append(gt_image)
+                        except Exception as e:
+                            safe_print(f"[Trainer] 批次 {b_idx}, 视图 {r_idx}: 渲染失败: {str(e)}")
+                            safe_print(f"[Trainer] 批次 {b_idx}, 视图 {r_idx}: 错误堆栈:\n{traceback.format_exc()}")
+                            if torch.cuda.is_available():
+                                safe_print(f"[Trainer] GPU内存使用: {torch.cuda.memory_allocated()/1024**3:.2f} GB / {torch.cuda.memory_reserved()/1024**3:.2f} GB")
+                            raise
+                except Exception as e:
+                    safe_print(f"[Trainer] 批次 {b_idx}: 处理失败: {str(e)}")
+                    safe_print(f"[Trainer] 批次 {b_idx}: 错误堆栈:\n{traceback.format_exc()}")
+                    raise
 
-        return rendered_images, gt_images
+            # Stack all images into tensors
+            safe_print(f"[Trainer] 堆叠图像，共 {len(rendered_images)} 张...")
+            rendered_images = torch.stack(rendered_images, dim=0)
+            gt_images = torch.stack(gt_images, dim=0)
+            safe_print(f"[Trainer] 堆叠完成: rendered_images形状={rendered_images.shape}, gt_images形状={gt_images.shape}")
+
+            return rendered_images, gt_images
+        except Exception as e:
+            safe_print(f"[Trainer] render_validation_views失败: {str(e)}")
+            safe_print(f"[Trainer] 完整错误堆栈:\n{traceback.format_exc()}")
+            if torch.cuda.is_available():
+                safe_print(f"[Trainer] GPU内存使用: {torch.cuda.memory_allocated()/1024**3:.2f} GB / {torch.cuda.memory_reserved()/1024**3:.2f} GB")
+            raise
 
     def update_router_temperature(self, iteration: int):
         """Update router temperature for Gumbel-Softmax annealing"""
@@ -502,54 +622,120 @@ class Trainer:
     
     def train_iteration(self, iteration: int) -> Dict[str, torch.Tensor]:
         """Execute one training iteration"""
-        data = next(iter(self.data_manager.train_loader))
+        try:
+            # 步骤1: 数据加载
+            safe_print(f"[Trainer] Iteration {iteration}: 开始加载数据...")
+            try:
+                data = next(iter(self.data_manager.train_loader))
+                safe_print(f"[Trainer] Iteration {iteration}: 数据加载完成")
+                safe_print(f"[Trainer] Iteration {iteration}: 数据键: {list(data.keys())}")
+                if 'gt_images' in data:
+                    safe_print(f"[Trainer] Iteration {iteration}: gt_images形状: {data['gt_images'].shape}")
+            except Exception as e:
+                safe_print(f"[Trainer] Iteration {iteration}: 数据加载失败: {str(e)}")
+                safe_print(f"[Trainer] Iteration {iteration}: 错误堆栈:\n{traceback.format_exc()}")
+                raise
 
-        model_inputs = prepare_model_inputs(data, self.cfg, self.data_manager.bs_per_gpu, self.device)
+            # 步骤2: 准备模型输入
+            safe_print(f"[Trainer] Iteration {iteration}: 准备模型输入...")
+            try:
+                model_inputs = prepare_model_inputs(data, self.cfg, self.data_manager.bs_per_gpu, self.device)
+                safe_print(f"[Trainer] Iteration {iteration}: 模型输入准备完成")
+                safe_print(f"[Trainer] Iteration {iteration}: 模型输入键: {list(model_inputs.keys())}")
+            except Exception as e:
+                safe_print(f"[Trainer] Iteration {iteration}: 模型输入准备失败: {str(e)}")
+                safe_print(f"[Trainer] Iteration {iteration}: 错误堆栈:\n{traceback.format_exc()}")
+                raise
 
-        # Update router temperature if using routing
-        self.update_router_temperature(iteration)
+            # 步骤3: 更新路由温度
+            try:
+                self.update_router_temperature(iteration)
+            except Exception as e:
+                safe_print(f"[Trainer] Iteration {iteration}: 路由温度更新失败: {str(e)}")
 
-        self.model_manager.model.train()
+            # 步骤4: 模型前向传播
+            safe_print(f"[Trainer] Iteration {iteration}: 开始模型前向传播...")
+            self.model_manager.model.train()
         
-        # Check if dual forward pass is needed for consistency loss
-        use_dual_forward = getattr(self.cfg.opt, 'use_dual_forward', False)
-        routing_weights = None
-        feat_with_2d = None
-        feat_without_2d = None
+            # Check if dual forward pass is needed for consistency loss
+            use_dual_forward = getattr(self.cfg.opt, 'use_dual_forward', False)
+            routing_weights = None
+            feat_with_2d = None
+            feat_without_2d = None
         
-        if use_dual_forward and self.cfg.opt.use_fusion:
-            # Forward pass WITH 2D features
-            gaussian_splats = self.model_manager.model(**model_inputs)
+            try:
+                if use_dual_forward and self.cfg.opt.use_fusion:
+                    # Forward pass WITH 2D features
+                    safe_print(f"[Trainer] Iteration {iteration}: 执行双前向传播（带2D特征）...")
+                    gaussian_splats = self.model_manager.model(**model_inputs)
+                    safe_print(f"[Trainer] Iteration {iteration}: 前向传播（带2D）完成")
+                
+                    # Extract intermediate features if available
+                    if hasattr(self.model_manager.model, 'get_intermediate_features'):
+                        feat_with_2d = self.model_manager.model.get_intermediate_features()
+                
+                    # Forward pass WITHOUT 2D features (for consistency loss)
+                    model_inputs_no_2d = model_inputs.copy()
+                    model_inputs_no_2d['image'] = None
+                
+                    with torch.no_grad():
+                        _ = self.model_manager.model(**model_inputs_no_2d)
+                        if hasattr(self.model_manager.model, 'get_intermediate_features'):
+                            feat_without_2d = self.model_manager.model.get_intermediate_features()
+                else:
+                    # Standard forward pass
+                    safe_print(f"[Trainer] Iteration {iteration}: 执行标准前向传播...")
+                    gaussian_splats = self.model_manager.model(**model_inputs)
+                    safe_print(f"[Trainer] Iteration {iteration}: 前向传播完成")
+                    safe_print(f"[Trainer] Iteration {iteration}: Gaussian splats键: {list(gaussian_splats.keys())}")
+            except Exception as e:
+                safe_print(f"[Trainer] Iteration {iteration}: 模型前向传播失败: {str(e)}")
+                safe_print(f"[Trainer] Iteration {iteration}: 错误堆栈:\n{traceback.format_exc()}")
+                # 检查GPU内存
+                if torch.cuda.is_available():
+                    safe_print(f"[Trainer] Iteration {iteration}: GPU内存使用: {torch.cuda.memory_allocated()/1024**3:.2f} GB / {torch.cuda.memory_reserved()/1024**3:.2f} GB")
+                raise
             
-            # Extract intermediate features if available
-            if hasattr(self.model_manager.model, 'get_intermediate_features'):
-                feat_with_2d = self.model_manager.model.get_intermediate_features()
-            
-            # Forward pass WITHOUT 2D features (for consistency loss)
-            model_inputs_no_2d = model_inputs.copy()
-            model_inputs_no_2d['image'] = None
-            
-            with torch.no_grad():
-                _ = self.model_manager.model(**model_inputs_no_2d)
-                if hasattr(self.model_manager.model, 'get_intermediate_features'):
-                    feat_without_2d = self.model_manager.model.get_intermediate_features()
-        else:
-            # Standard forward pass
-            gaussian_splats = self.model_manager.model(**model_inputs)
+            # 步骤5: 提取路由权重
+            try:
+                if hasattr(self.model_manager.model, 'get_routing_weights'):
+                    routing_weights = self.model_manager.model.get_routing_weights()
+            except Exception as e:
+                safe_print(f"[Trainer] Iteration {iteration}: 提取路由权重失败: {str(e)}")
         
-        # Extract routing weights if available
-        if hasattr(self.model_manager.model, 'get_routing_weights'):
-            routing_weights = self.model_manager.model.get_routing_weights()
-        
-        rendered_images, gt_images = self.render_validation_views(gaussian_splats, data)
+            # 步骤6: 渲染验证视图
+            safe_print(f"[Trainer] Iteration {iteration}: 开始渲染验证视图...")
+            try:
+                rendered_images, gt_images = self.render_validation_views(gaussian_splats, data)
+                safe_print(f"[Trainer] Iteration {iteration}: 渲染完成")
+                safe_print(f"[Trainer] Iteration {iteration}: 渲染图像形状: {rendered_images.shape}")
+            except Exception as e:
+                safe_print(f"[Trainer] Iteration {iteration}: 渲染失败: {str(e)}")
+                safe_print(f"[Trainer] Iteration {iteration}: 错误堆栈:\n{traceback.format_exc()}")
+                # 检查GPU内存
+                if torch.cuda.is_available():
+                    safe_print(f"[Trainer] Iteration {iteration}: GPU内存使用: {torch.cuda.memory_allocated()/1024**3:.2f} GB / {torch.cuda.memory_reserved()/1024**3:.2f} GB")
+                raise
 
-        # Calculate losses with additional terms
-        return self.validation_manager.calculate_losses(
-            rendered_images, gt_images, iteration,
-            routing_weights=routing_weights,
-            feat_with_2d=feat_with_2d,
-            feat_without_2d=feat_without_2d,
-        )
+            # 步骤7: 计算损失
+            safe_print(f"[Trainer] Iteration {iteration}: 开始计算损失...")
+            try:
+                losses = self.validation_manager.calculate_losses(
+                    rendered_images, gt_images, iteration,
+                    routing_weights=routing_weights,
+                    feat_with_2d=feat_with_2d,
+                    feat_without_2d=feat_without_2d,
+                )
+                safe_print(f"[Trainer] Iteration {iteration}: 损失计算完成")
+                return losses
+            except Exception as e:
+                safe_print(f"[Trainer] Iteration {iteration}: 损失计算失败: {str(e)}")
+                safe_print(f"[Trainer] Iteration {iteration}: 错误堆栈:\n{traceback.format_exc()}")
+                raise
+        except Exception as e:
+            safe_print(f"[Trainer] Iteration {iteration}: 训练迭代失败: {str(e)}")
+            safe_print(f"[Trainer] Iteration {iteration}: 完整错误堆栈:\n{traceback.format_exc()}")
+            raise
 
     def validate(self, iteration: int) -> None:
         """Perform validation and generate test videos"""

@@ -37,24 +37,63 @@ class SubsampleGroup(nn.Module):
             raise NotImplementedError(f'{self.group.lower()} is not implemented. Only support ballquery, knn')
 
     def forward(self, p, x=None):
+        # Ensure input is contiguous
+        p = p.contiguous()
+        if x is not None:
+            x = x.contiguous()
+        
+        # CUDA synchronization before sampling
+        if torch.cuda.is_available() and p.is_cuda:
+            torch.cuda.synchronize()
+        
         if 'fps' in self.subsample.lower() or 'furthest' in self.subsample.lower() or 'farthest' in self.subsample.lower():
             idx = furthest_point_sample(p, self.num_groups).to(torch.int64)
         elif 'random' in self.subsample.lower() or 'rs' in self.subsample.lower():
             idx = random_sample(p, self.num_groups)
         else:
             raise NotImplementedError(f'{self.subsample.lower()} is not implemented. Only support fps, random')
+        
+        # Ensure idx is contiguous
+        if not idx.is_contiguous():
+            idx = idx.contiguous()
+        
         center_p = torch.gather(p, 1,
                                   idx.unsqueeze(-1).expand(-1, -1, 3))  # downsampled point cloud, [B, npoint, 3]
         # center_p = torch.gather(p, 1,
         #                     idx.unsqueeze(-1).expand(-1, -1, p.shape[-1]))  # downsampled point cloud, [B, npoint, p.shape[-1]]
-        if x is not None:
-            B, C, N = x.shape[:3]
-            center_x = torch.gather(x, 2, idx.unsqueeze(1).expand(-1, C, -1)).unsqueeze(-1)
-            grouped_p, fj = self.grouper(center_p, p, x)
-            return grouped_p, center_p, fj, center_x
-        else:
-            grouped_p, _ = self.grouper(center_p, p)
-            return grouped_p, center_p
+        
+        # CUDA synchronization after sampling
+        if torch.cuda.is_available() and p.is_cuda:
+            torch.cuda.synchronize()
+            print(f"[SubsampleGroup] 采样完成，准备调用 grouper...")
+            print(f"[SubsampleGroup] p shape: {p.shape}, device: {p.device}, is_contiguous: {p.is_contiguous()}")
+            print(f"[SubsampleGroup] center_p shape: {center_p.shape}, device: {center_p.device}, is_contiguous: {center_p.is_contiguous()}")
+            print(f"[SubsampleGroup] idx shape: {idx.shape}, device: {idx.device}, dtype: {idx.dtype}, is_contiguous: {idx.is_contiguous()}")
+            if x is not None:
+                print(f"[SubsampleGroup] x shape: {x.shape}, device: {x.device}, is_contiguous: {x.is_contiguous()}")
+        
+        try:
+            if x is not None:
+                B, C, N = x.shape[:3]
+                center_x = torch.gather(x, 2, idx.unsqueeze(1).expand(-1, C, -1)).unsqueeze(-1)
+                print(f"[SubsampleGroup] 调用 grouper(center_p, p, x)...")
+                grouped_p, fj = self.grouper(center_p, p, x)
+                print(f"[SubsampleGroup] grouper 返回成功")
+                print(f"[SubsampleGroup] grouped_p shape: {grouped_p.shape}, device: {grouped_p.device}, is_contiguous: {grouped_p.is_contiguous()}")
+                return grouped_p, center_p, fj, center_x
+            else:
+                print(f"[SubsampleGroup] 调用 grouper(center_p, p)...")
+                grouped_p, _ = self.grouper(center_p, p)
+                print(f"[SubsampleGroup] grouper 返回成功")
+                print(f"[SubsampleGroup] grouped_p shape: {grouped_p.shape}, device: {grouped_p.device}, is_contiguous: {grouped_p.is_contiguous()}")
+                return grouped_p, center_p
+        except Exception as e:
+            import traceback
+            print(f"[SubsampleGroup] grouper 调用失败: {e}")
+            print(f"[SubsampleGroup] traceback:\n{traceback.format_exc()}")
+            if torch.cuda.is_available() and p.is_cuda:
+                print(f"[SubsampleGroup] CUDA error: {torch.cuda.get_last_error()}")
+            raise
 
 
 @MODELS.register_module()

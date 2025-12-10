@@ -90,7 +90,7 @@ class GroupingOperation(Function):
 
         B, nfeatures, nsample = idx.size()
         _, C, N = features.size()
-        output = torch.cuda.FloatTensor(B, C, nfeatures, nsample, device=features.device)
+        output = torch.zeros(B, C, nfeatures, nsample, dtype=torch.float32, device=features.device)
 
         pointnet2_cuda.group_points_wrapper(B, C, N, nfeatures, nsample, features, idx, output)
 
@@ -153,7 +153,7 @@ class GatherOperation(Function):
 
         B, npoint = idx.size()
         _, C, N = features.size()
-        output = torch.cuda.FloatTensor(B, C, npoint, device=features.device)
+        output = torch.zeros(B, C, npoint, dtype=torch.float32, device=features.device)
 
         pointnet2_cuda.gather_points_wrapper(B, C, N, npoint, features, idx, output)
 
@@ -186,13 +186,32 @@ class BallQuery(Function):
         :return:
             idx: (B, npoint, nsample) tensor with the indicies of the features that form the query balls
         """
-        assert new_xyz.is_contiguous()
-        assert xyz.is_contiguous()
+        # Ensure tensors are float32, contiguous, and on the same device
+        device = xyz.device
+        xyz = xyz.contiguous().to(device).float()
+        new_xyz = new_xyz.contiguous().to(device).float()
+        
+        # Verify tensor properties before CUDA call
+        assert new_xyz.is_contiguous(), f"new_xyz is not contiguous: {new_xyz.is_contiguous()}"
+        assert xyz.is_contiguous(), f"xyz is not contiguous: {xyz.is_contiguous()}"
+        assert xyz.dtype == torch.float32, f"xyz dtype is {xyz.dtype}, expected float32"
+        assert new_xyz.dtype == torch.float32, f"new_xyz dtype is {new_xyz.dtype}, expected float32"
+        assert xyz.device == new_xyz.device, f"Device mismatch: xyz on {xyz.device}, new_xyz on {new_xyz.device}"
 
         B, N, _ = xyz.size()
         npoint = new_xyz.size(1)
-        idx = torch.cuda.IntTensor(B, npoint, nsample, device=xyz.device).zero_()
+        idx = torch.zeros(B, npoint, nsample, dtype=torch.int32, device=device)
+        
+        # CUDA synchronization before CUDA extension call
+        if xyz.is_cuda:
+            torch.cuda.synchronize()
+        
         pointnet2_cuda.ball_query_wrapper(B, N, npoint, radius, nsample, new_xyz, xyz, idx)
+        
+        # CUDA synchronization after CUDA extension call
+        if xyz.is_cuda:
+            torch.cuda.synchronize()
+        
         return idx
 
     @staticmethod
@@ -241,17 +260,95 @@ class QueryAndGroup(nn.Module):
         :return:
             new_features: (B, 3 + C, npoint, nsample)
         """
-        idx = ball_query(self.radius, self.nsample, support_xyz, query_xyz)
+        # Ensure inputs are float32, contiguous and on the same device
+        device = query_xyz.device
+        # Convert to float32 explicitly - CUDA extensions require float32
+        query_xyz = query_xyz.contiguous().to(device).float()
+        support_xyz = support_xyz.contiguous().to(device).float()
+        if features is not None:
+            features = features.contiguous().to(device)
+        
+        # Verify tensor properties
+        assert query_xyz.dtype == torch.float32, f"query_xyz dtype is {query_xyz.dtype}, expected float32"
+        assert support_xyz.dtype == torch.float32, f"support_xyz dtype is {support_xyz.dtype}, expected float32"
+        assert query_xyz.is_contiguous(), f"query_xyz is not contiguous"
+        assert support_xyz.is_contiguous(), f"support_xyz is not contiguous"
+        
+        # CUDA synchronization before ball_query
+        if torch.cuda.is_available() and query_xyz.is_cuda:
+            torch.cuda.synchronize()
+            print(f"[QueryAndGroup] 准备调用 ball_query...")
+            print(f"[QueryAndGroup] query_xyz shape: {query_xyz.shape}, dtype: {query_xyz.dtype}, device: {query_xyz.device}, is_contiguous: {query_xyz.is_contiguous()}")
+            print(f"[QueryAndGroup] support_xyz shape: {support_xyz.shape}, dtype: {support_xyz.dtype}, device: {support_xyz.device}, is_contiguous: {support_xyz.is_contiguous()}")
+            print(f"[QueryAndGroup] radius: {self.radius}, nsample: {self.nsample}")
+        
+        try:
+            print(f"[QueryAndGroup] 调用 ball_query(radius={self.radius}, nsample={self.nsample}, xyz=support_xyz, new_xyz=query_xyz)...")
+            # ball_query expects (radius, nsample, xyz, new_xyz)
+            # where xyz is (B, N, 3) and new_xyz is (B, npoint, 3)
+            idx = ball_query(self.radius, self.nsample, support_xyz, query_xyz)
+            print(f"[QueryAndGroup] ball_query 返回成功")
+        except Exception as e:
+            import traceback
+            print(f"[QueryAndGroup] ball_query 失败: {e}")
+            print(f"[QueryAndGroup] traceback:\n{traceback.format_exc()}")
+            if torch.cuda.is_available() and query_xyz.is_cuda:
+                print(f"[QueryAndGroup] CUDA error: {torch.cuda.get_last_error()}")
+            raise
+        
+        # Ensure idx is contiguous (critical for CUDA operations)
+        if not idx.is_contiguous():
+            idx = idx.contiguous()
+        print(f"[QueryAndGroup] idx shape: {idx.shape}, device: {idx.device}, dtype: {idx.dtype}, is_contiguous: {idx.is_contiguous()}")
 
         if self.return_only_idx:
             return idx
+        
         xyz_trans = support_xyz.transpose(1, 2).contiguous()
-        grouped_xyz = grouping_operation(xyz_trans, idx)  # (B, 3, npoint, nsample)
+        print(f"[QueryAndGroup] xyz_trans shape: {xyz_trans.shape}, device: {xyz_trans.device}, is_contiguous: {xyz_trans.is_contiguous()}")
+        
+        # CUDA synchronization before grouping_operation
+        if torch.cuda.is_available() and xyz_trans.is_cuda:
+            torch.cuda.synchronize()
+        
+        try:
+            print(f"[QueryAndGroup] 调用 grouping_operation(xyz_trans, idx)...")
+            grouped_xyz = grouping_operation(xyz_trans, idx)  # (B, 3, npoint, nsample)
+            print(f"[QueryAndGroup] grouping_operation 返回成功")
+            print(f"[QueryAndGroup] grouped_xyz shape: {grouped_xyz.shape}, device: {grouped_xyz.device}, is_contiguous: {grouped_xyz.is_contiguous()}")
+        except Exception as e:
+            import traceback
+            print(f"[QueryAndGroup] grouping_operation 失败: {e}")
+            print(f"[QueryAndGroup] traceback:\n{traceback.format_exc()}")
+            if torch.cuda.is_available() and xyz_trans.is_cuda:
+                print(f"[QueryAndGroup] CUDA error: {torch.cuda.get_last_error()}")
+            raise
+        
         if self.relative_xyz:
-            grouped_xyz = grouped_xyz - query_xyz.transpose(1, 2).unsqueeze(-1)  # relative position
+            query_xyz_trans = query_xyz.transpose(1, 2).contiguous()
+            grouped_xyz = grouped_xyz - query_xyz_trans.unsqueeze(-1)  # relative position
             if self.normalize_dp:
                 grouped_xyz /= self.radius
-        grouped_features = grouping_operation(features, idx) if features is not None else None
+        
+        grouped_features = None
+        if features is not None:
+            # Ensure features is contiguous before grouping
+            if not features.is_contiguous():
+                features = features.contiguous()
+            print(f"[QueryAndGroup] features shape: {features.shape}, device: {features.device}, is_contiguous: {features.is_contiguous()}")
+            try:
+                print(f"[QueryAndGroup] 调用 grouping_operation(features, idx)...")
+                grouped_features = grouping_operation(features, idx)
+                print(f"[QueryAndGroup] grouping_operation(features) 返回成功")
+                print(f"[QueryAndGroup] grouped_features shape: {grouped_features.shape}, device: {grouped_features.device}, is_contiguous: {grouped_features.is_contiguous()}")
+            except Exception as e:
+                import traceback
+                print(f"[QueryAndGroup] grouping_operation(features) 失败: {e}")
+                print(f"[QueryAndGroup] traceback:\n{traceback.format_exc()}")
+                if torch.cuda.is_available() and features.is_cuda:
+                    print(f"[QueryAndGroup] CUDA error: {torch.cuda.get_last_error()}")
+                raise
+        
         return grouped_xyz, grouped_features
 
 
@@ -303,17 +400,42 @@ class KNNGroup(nn.Module):
         :return:
             new_features: (B, 3 + C, npoint, nsample)
         """
+        # Ensure inputs are contiguous and on the same device
+        device = query_xyz.device
+        query_xyz = query_xyz.contiguous().to(device)
+        support_xyz = support_xyz.contiguous().to(device)
+        if features is not None:
+            features = features.contiguous().to(device)
+        
+        # CUDA synchronization before KNN
+        if torch.cuda.is_available() and query_xyz.is_cuda:
+            torch.cuda.synchronize()
+        
         _, idx = self.knn(support_xyz, query_xyz)
         if self.return_only_idx:
             return idx
         idx = idx.int()
+        
+        # Ensure idx is contiguous (critical for CUDA operations)
+        if not idx.is_contiguous():
+            idx = idx.contiguous()
+        
         xyz_trans = support_xyz.transpose(1, 2).contiguous()
+        
+        # CUDA synchronization before grouping_operation
+        if torch.cuda.is_available() and xyz_trans.is_cuda:
+            torch.cuda.synchronize()
+        
         grouped_xyz = grouping_operation(xyz_trans, idx)  # (B, 3, npoint, nsample)
         if self.relative_xyz:
-            grouped_xyz -= query_xyz.transpose(1, 2).unsqueeze(-1)  # relative position
+            query_xyz_trans = query_xyz.transpose(1, 2).contiguous()
+            grouped_xyz -= query_xyz_trans.unsqueeze(-1)  # relative position
         if self.normalize_dp:
             grouped_xyz /= torch.amax(torch.sqrt(torch.sum(grouped_xyz**2, dim=1)), dim=(1, 2)).view(-1, 1, 1, 1)
         if features is not None:
+            # Ensure features is contiguous before grouping
+            if not features.is_contiguous():
+                features = features.contiguous()
             grouped_features = grouping_operation(features, idx)
             return grouped_xyz, grouped_features
         else:

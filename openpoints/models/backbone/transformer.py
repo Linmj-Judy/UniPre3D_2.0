@@ -295,16 +295,76 @@ class PointTransformerEncoder(nn.Module):
         feature_mlps,
         intricsic,
     ):
+        print(f"[PointTransformerEncoder] forward() 开始调用")
+        print(f"[PointTransformerEncoder] 参数检查:")
+        print(f"[PointTransformerEncoder]   - pts类型: {type(pts)}, 是否为dict: {isinstance(pts, dict)}")
+        if isinstance(pts, dict):
+            print(f"[PointTransformerEncoder]   - pts键: {list(pts.keys())}")
+            for k, v in pts.items():
+                if isinstance(v, torch.Tensor):
+                    print(f"[PointTransformerEncoder]   - pts['{k}']: shape={v.shape}, device={v.device}, dtype={v.dtype}")
+        print(f"[PointTransformerEncoder]   - image_features: shape={image_features.shape}, device={image_features.device}")
+        print(f"[PointTransformerEncoder]   - c2w_projection_matrix: shape={c2w_projection_matrix.shape}, device={c2w_projection_matrix.device}")
+        print(f"[PointTransformerEncoder]   - feature_mlps类型: {type(feature_mlps)}")
+        print(f"[PointTransformerEncoder]   - intricsic: shape={intricsic.shape if isinstance(intricsic, torch.Tensor) else 'N/A'}, device={intricsic.device if isinstance(intricsic, torch.Tensor) else 'N/A'}")
+        
         # Get feature fusion module
+        print(f"[PointTransformerEncoder] 创建FeatureFusion模块...")
         feature_fusion = FeatureFusion(feature_mlps) if self.use_fusion else None
+        print(f"[PointTransformerEncoder] FeatureFusion模块创建完成: {feature_fusion is not None}")
 
         if isinstance(pts, dict):
             pts, x = pts["pos"], pts.get("x", None)
         # divide the point cloud in the same form. This is important
         pts = pts[:, :, :3].contiguous()
-        neighborhood, center = self.group_divider(pts)
+        
+        # Ensure pts is on the correct device and contiguous
+        device = pts.device
+        if not pts.is_contiguous():
+            pts = pts.contiguous()
+        
+        # CUDA synchronization before group_divider to avoid segfault
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            print(f"[PointTransformerEncoder] 准备调用 group_divider...")
+            print(f"[PointTransformerEncoder] pts shape: {pts.shape}, device: {pts.device}, dtype: {pts.dtype}, is_contiguous: {pts.is_contiguous()}")
+            print(f"[PointTransformerEncoder] CUDA memory allocated: {torch.cuda.memory_allocated(device)/1024**3:.2f} GB")
+        
+        try:
+            print(f"[PointTransformerEncoder] 调用 group_divider.forward()...")
+            neighborhood, center = self.group_divider(pts)
+            print(f"[PointTransformerEncoder] group_divider 返回成功")
+            print(f"[PointTransformerEncoder] neighborhood shape: {neighborhood.shape}, device: {neighborhood.device}, is_contiguous: {neighborhood.is_contiguous()}")
+            print(f"[PointTransformerEncoder] center shape: {center.shape}, device: {center.device}, is_contiguous: {center.is_contiguous()}")
+        except Exception as e:
+            import traceback
+            print(f"[PointTransformerEncoder] group_divider failed: {e}")
+            print(f"[PointTransformerEncoder] pts shape: {pts.shape}, device: {pts.device}, dtype: {pts.dtype}")
+            print(f"[PointTransformerEncoder] traceback:\n{traceback.format_exc()}")
+            raise
+        except RuntimeError as e:
+            import traceback
+            print(f"[PointTransformerEncoder] group_divider RuntimeError: {e}")
+            print(f"[PointTransformerEncoder] pts shape: {pts.shape}, device: {pts.device}, dtype: {pts.dtype}")
+            print(f"[PointTransformerEncoder] traceback:\n{traceback.format_exc()}")
+            if torch.cuda.is_available():
+                print(f"[PointTransformerEncoder] CUDA error: {torch.cuda.get_last_error()}")
+            raise
+        
+        # Ensure neighborhood and center are contiguous
+        if not neighborhood.is_contiguous():
+            neighborhood = neighborhood.contiguous()
+        if not center.is_contiguous():
+            center = center.contiguous()
+        
+        # CUDA synchronization after group_divider
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        
         # encoder the input cloud blocks
-        group_input_tokens = self.encoder(neighborhood.permute(0, 2, 3, 1))  #  B G N
+        # neighborhood shape: (B, 3, num_groups, group_size) -> permute to (B, num_groups, group_size, 3)
+        neighborhood_permuted = neighborhood.permute(0, 2, 3, 1).contiguous()
+        group_input_tokens = self.encoder(neighborhood_permuted)  #  B G N
         group_input_tokens = self.reduce_dim(group_input_tokens)
         # prepare cls
         cls_tokens = self.cls_token.expand(group_input_tokens.size(0), -1, -1)

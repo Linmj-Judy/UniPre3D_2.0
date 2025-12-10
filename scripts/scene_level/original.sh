@@ -17,6 +17,8 @@ source ~/lmj/.bashrc_cu12
 conda activate /public/home/lingwang/anaconda3/envs/UniPre3D
 cd /public/home/lingwang/lmj/UniPre3D
 
+export PYTHONPATH=/public/home/lingwang/lmj/UniPre3D:$PYTHONPATH
+
 # 限制OpenBLAS线程数以避免资源耗尽
 export OPENBLAS_NUM_THREADS=4
 export MKL_NUM_THREADS=4
@@ -31,6 +33,7 @@ export PATH=/public/software/cuda/local/cuda-12.1/bin${PATH:+:${PATH}}
 export LD_LIBRARY_PATH=/public/software/cuda/local/cuda-12.1/targets/x86_64-linux/lib:$LD_LIBRARY_PATH
 export LD_LIBRARY_PATH=/public/software/cuda/local/cuda-12.1/lib64${LD_LIBRARY_PATH+:${LD_LIBRARY_PATH}}
 
+export PYTHONPATH=/public/home/lingwang/lmj/UniPre3D:$PYTHONPATH
 
 
 # ============================================
